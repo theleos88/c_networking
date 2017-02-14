@@ -2,16 +2,14 @@
  * (used by tshark and tcpdump) and dumping out some corresponding information
  * in a human-readable form.
  *
- * Note, this program is limited to processing trace files that contains
- * UDP packets.  It prints the timestamp, source port, destination port,
- * and length of each such packet.
+ * Note, this program is (NOT) limited to processing trace files that contains
+ * only UDP packets.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -30,7 +28,7 @@ typedef u_int tcp_seq;
  *
  * Per RFC 768, September, 1981.
  */
-struct UDP_hdr {
+struct udp_hdr {
     u_short uh_sport;       /* source port */
     u_short uh_dport;       /* destination port */
     u_short uh_ulen;        /* datagram length */
@@ -61,21 +59,27 @@ struct tcp_hdr {
 
 
 
-uint64_t get_value( void* packet, int size ){
+uint64_t print_value( void* packet, int size ){
     uint8_t* pointer = (uint8_t*) packet;
     uint64_t data=0;
 
     int i=0;
     for (i=0;i<size;i++){
-//        printf("%02x ", *pointer);
+        printf("%02x", *pointer);
         data+=(*pointer);
         pointer++;
     }
-//    printf("\n");
+    printf(" ");
     return data;
-
 }
 
+void print_tcp(struct ip *ip, struct tcp_hdr *tcp){
+    printf("%08x %08x %04x %04x %04x ", (uint32_t) ip->ip_src.s_addr, (uint32_t) ip->ip_dst.s_addr, ip->ip_p, tcp->th_sport, tcp->th_dport );
+}
+
+void print_udp(struct ip *ip, struct udp_hdr *udp){
+    printf("%08x %08x %04x %04x %04x ", (uint32_t) ip->ip_src.s_addr, (uint32_t) ip->ip_dst.s_addr, ip->ip_p, udp->uh_sport, udp->uh_dport );
+}
 
 /* Some helper functions, which we define at the end of this file. */
 
@@ -103,16 +107,18 @@ void too_short(struct timeval ts, const char *truncated_hdr);
  * packet.  However, the packet pointer only holds that much data, so
  * we have to be careful not to read beyond it.
  */
-void dump_UDP_packet(const unsigned char *packet, struct timeval ts,
+void dump_packet(const unsigned char *packet, struct timeval ts,
             unsigned int capture_len)
 {
     struct ip *ip;
-    struct UDP_hdr *udp;
+    struct udp_hdr *udp;
+    struct tcp_hdr *tcp;
+    
+    int size = capture_len;
+    
     struct ether_header *eth_p;
 
     unsigned int IP_header_length;
-
-    /* For simplicity, we assume Ethernet encapsulation. */
 
     if (capture_len < sizeof(struct ether_header))
         {
@@ -123,17 +129,8 @@ void dump_UDP_packet(const unsigned char *packet, struct timeval ts,
         return;
         }
 
-
     /* Check MAC address and IP src and dest */
     eth_p = (struct ether_header*)packet;
-
-    //printf ("%I64d\n",  get_value(eth_p->ether_dhost, ETH_ALEN)  );
-    //printf ("%I64d\n",  get_value(eth_p->ether_shost, ETH_ALEN)  );
-
-
-    //printf("Dest MAC: %s\n", ether_ntoa(&eth_p->destAddr));
-    //printf("Source MAC: %s\n", ether_ntoa(&eth_p->sourceAddr));
-
 
     /* Skip over the Ethernet header. */
     packet += sizeof(struct ether_header);
@@ -145,9 +142,6 @@ void dump_UDP_packet(const unsigned char *packet, struct timeval ts,
         return;
         }
 
-
-
-
     ip = (struct ip*) packet;
     IP_header_length = ip->ip_hl * 4;   /* ip_hl is in 4-byte words */
 
@@ -156,40 +150,37 @@ void dump_UDP_packet(const unsigned char *packet, struct timeval ts,
         too_short(ts, "IP header with options");
         return;
         }
+    
+    packet += IP_header_length;
 
-    get_value(eth_p->ether_dhost, ETH_ALEN);
-    get_value(eth_p->ether_shost, ETH_ALEN);
-
-
-    if (ip->ip_p == IPPROTO_TCP){
-        struct tcp_hdr *tcp = (struct tcp_hdr*)packet;
-        printf("TCP_PCKT %d\n", tcp->th_sport);
+    switch (ip->ip_p){
+        case IPPROTO_TCP:
+            tcp = (struct tcp_hdr*)packet;
+            print_tcp(ip, tcp);
+            printf("%d\n", size);
+            break;
+        case IPPROTO_UDP:
+            udp = (struct udp_hdr*) packet;
+            print_udp(ip, udp);
+            printf("%d\n", size);
+            break;
+        default:
+            print_value(eth_p->ether_dhost, ETH_ALEN);
+            print_value(eth_p->ether_shost, ETH_ALEN);
+            printf("%d %d\n", ip->ip_p, size);
+            break;
     }
 
-    if (ip->ip_p != IPPROTO_UDP)
-        {
-        problem_pkt(ts, "non-UDP packet");
-        return;
-        }
 
     /* Skip over the IP header to get to the UDP header. */
-    packet += IP_header_length;
     capture_len -= IP_header_length;
 
-    if (capture_len < sizeof(struct UDP_hdr))
-        {
+    if (capture_len < sizeof(struct udp_hdr))
+    {
         too_short(ts, "UDP header");
         return;
-        }
-
-    udp = (struct UDP_hdr*) packet;
-
-    printf("%s UDP src_port=%d dst_port=%d length=%d\n",
-        timestamp_string(ts),
-        ntohs(udp->uh_sport),
-        ntohs(udp->uh_dport),
-        ntohs(udp->uh_ulen));
     }
+}
 
 
 int main(int argc, char *argv[])
@@ -220,11 +211,10 @@ int main(int argc, char *argv[])
      * some to read.
      */
     int i=0;
+    printf("# Pktsrc, Pktdst, Protocol, [Portsrc, portdst], Size\n");
     while ((packet = pcap_next(pcap, &header)) != NULL){
         i++;
-        dump_UDP_packet(packet, header.ts, header.caplen);
-        if (i>10000)
-            break;
+        dump_packet(packet, header.ts, header.caplen);
     }
     printf("Read %d packets\n", i);
 
